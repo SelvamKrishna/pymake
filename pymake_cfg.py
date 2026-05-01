@@ -1,25 +1,16 @@
-# Name of the project
-NAME: str = "app"
+NAME = "app"
+VERSION = "1.0.0"
 
-# C++ compiler
-CXX: str = "g++"
+CC = "g++"
+STANDARD = "c++23"
 
-# Version
-VER: int = 23
+SRC_DIR = "source"
+OUT_DIR = "build"
 
-# Source Directory
-SRC_DIR: str = "test"
+INC_DIRS = ["include"]
+LIB_DIRS = ["external"]
 
-# Output Directory
-OUT_DIR: str = "build"
+LIBRARIES = []
+DEFINES = []
 
-# Linked Libraries
-LINKS: list[str] = []
-
-# Include Directories
-INCLUDES: list[str] = ["include"]
-
-# Preprocessor Macros
-DEFINES: list[str] = []
-
-PARALLEL: int = 4
+PARALLEL = 4
