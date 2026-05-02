@@ -1,221 +1,262 @@
 import sys
+import time
 import platform
-import colorama
 import subprocess
 import shutil
+import colorama
 
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
-import pymake_cfg as cfg
-
-
-def _get_target() -> Path:
-    target = Path(cfg.OUT_DIR) / cfg.NAME
-    if platform.system() == "Windows":
-        target = target.with_suffix(".exe")
-    return target
+VERSION: int = 1
+PLATFORM = platform.system()
+SOURCE_EXTENSIONS: set = {".c", ".cc", ".cpp", ".c++", ".cxx"}
 
 
-TARGET = _get_target()
-OBJ_DIR = Path(cfg.OUT_DIR)
-VALID_EXTENSIONS = {".c", ".cc", ".cpp", ".c++", ".cxx"}
-
-flag_verbose = False
-
-
-def _ansi_print(color: str, message: str, end: str = "\n") -> None:
-    print(f"{color}{message}{colorama.Style.RESET_ALL}")
+class BuildMode(Enum):
+    DEBUG = 0,
+    RELEASE = 1,
+    RUN = 2
 
 
-def _print_err(exit_code: int, message: str, flag_exit: bool = True) -> None:
-    _ansi_print(colorama.Fore.RED, f"Error: {message}")
-    if flag_exit:
-        sys.exit(exit_code)
+@dataclass(frozen=True)
+class BuildConfig:
+    mode: BuildMode
+    should_clean: bool = False
+    should_run_after: bool = False
+    is_verbose: bool = False
+    run_args: list[str] | None = None
+
+    def is_mode_release(self) -> bool:
+        return self.mode == BuildMode.RELEASE
+
+    def is_mode_debug(self) -> bool:
+        return self.mode == BuildMode.DEBUG
+
+    def is_mode_run(self) -> bool:
+        return self.mode == BuildMode.RUN
+
+    def should_run(self) -> bool:
+        return self.is_mode_run() or self.should_run_after
 
 
-def _print_help_message() -> None:
-    def _print_usage(cmd: str, desc: str) -> None:
-        print(f"    {sys.argv[0]} {cmd} => ", end="")
-        _ansi_print(colorama.Fore.BLUE, desc)
+@dataclass(frozen=True)
+class ProjectConfig:
+    name: str = "app"
+    cc: str = "g++"
+    standard: str = "c++23"
+    cxx_flags: tuple[str, ...] = ("-Wall", "-Wextra", "-Wpedantic")
+    src_dir: Path = Path("source")
+    out_dir: Path = Path("build")
+    inc_dirs: tuple[Path, ...] = (Path("include"),)
+    lib_dirs: tuple[Path, ...] = (Path("external"),)
+    libraries: tuple[str, ...] = ()
+    defines: tuple[str, ...] = ()
+    parallel: int = 8
 
-    def _print_flag(cmd: str, desc: str) -> None:
-        print(f"    {cmd} => ", end="")
-        _ansi_print(colorama.Fore.BLUE, desc)
-
-    _ansi_print(colorama.Style.BRIGHT, f"PyMake v{cfg.VERSION}")
-
-    _ansi_print(colorama.Style.BRIGHT, f"\nUsage:")
-    _print_usage("[--help | -h]", "Show this help")
-    _print_usage("debug [flags]", "Build with debug symbols")
-    _print_usage("release [flags]", "Build optimized")
-    _print_usage("run", "Run binary")
-
-    _ansi_print(colorama.Style.BRIGHT, f"\nFlags:")
-    _print_flag("--verbose | -v", "Show commands")
-    _print_flag("--clean   | -c", "Clean build first")
-    _print_flag("--run     | -r", "Run after build")
-
-    print("")
-    sys.exit(0)
+    def target(self) -> Path:
+        target = self.out_dir / self.name
+        return target if not PLATFORM == "Windows" else target.with_suffix(".o")
 
 
-def _run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
-    if flag_verbose:
-        _ansi_print(colorama.Style.DIM, f"> {' '.join(str(c) for c in cmd)}")
+class Project:
+    def __init__(self, cfg: ProjectConfig) -> None:
+        self.cfg = cfg
+        self.exec_cmd = [
+            self.cfg.cc, f"-std={self.cfg.standard}", *self.cfg.cxx_flags
+        ]
 
-    return subprocess.run(cmd, check=False)
-
-
-class ProjectBuilder:
-    def __init__(self, flag_clean: bool, is_mode_release: bool) -> None:
-        self.out_dir = Path(cfg.OUT_DIR)
-        self.src_dir = Path(cfg.SRC_DIR)
-        self.mode_release: bool = is_mode_release
-
-        self.sources = self._collect_srcs()
-
-        if not self.sources:
-            _print_err(1, "No sources found")
-
-        self._prepare_dirs(flag_clean)
-        self.exec_cmd = self._build_exec_cmd()
-
-    def _prepare_dirs(self, flag_clean: bool):
-        if flag_clean and self.out_dir.exists():
-            shutil.rmtree(self.out_dir)
-
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-
-        if not self.src_dir.exists():
-            _print_err(1, f"Source directory `{self.src_dir}` not found")
+    @staticmethod
+    def _needs_compile(src: Path, obj: Path) -> bool:
+        # TODO: Add support for dependencies
+        return not obj.exists() or src.stat().st_mtime > obj.stat().st_mtime
 
     def _collect_srcs(self) -> list[Path]:
+        if not self.cfg.src_dir.exists():
+            Log.err(f"Source directory `{self.cfg.src_dir}` does not exist")
+
         return sorted(
-            Path(source)
-            for source in self.src_dir.rglob("*")
-            if source.suffix in VALID_EXTENSIONS
+            path
+            for path in self.cfg.src_dir.rglob("*")
+            if path.suffix in SOURCE_EXTENSIONS
         )
 
-    def _build_exec_cmd(self) -> list[str]:
-        exec_cmd = [cfg.CC, f"-std={cfg.STANDARD}", *cfg.CXX_FLAGS]
+    def _compile_srcs(self) -> list[Path]:
+        def src_to_obj(src: Path):
+            obj = self.cfg.out_dir / \
+                src.relative_to(src.parent).with_suffix(".o")
 
-        if self.mode_release:
-            exec_cmd.extend(["-O2", "-DNDEBUG", "-s"])
-        else:
-            exec_cmd.extend(["-O0", "-g"])
+            if not Project._needs_compile(src, obj):
+                return obj
 
-        exec_cmd.extend(f"-I{inc_dir}" for inc_dir in cfg.INC_DIRS)
-        exec_cmd.extend(f"-D{define}" for define in cfg.DEFINES)
-        exec_cmd.extend(f"-L{lib_dir}" for lib_dir in cfg.LIB_DIRS)
-        exec_cmd.extend(f"-l{library}" for library in cfg.LIBRARIES)
+            result = _run_cmd([
+                *self.exec_cmd,
+                "-c", str(src.relative_to(Path.cwd())),
+                "-o", str(obj.relative_to(Path.cwd()))
+            ])
 
-        return exec_cmd
+            if result.returncode != 0:
+                Log.err(f"Failed to compile `{src}`", result.returncode)
 
-    @staticmethod
-    def _need_recompile(src_path: Path, obj_path: Path) -> bool:
-        return not obj_path.exists() or src_path.stat().st_mtime > obj_path.stat().st_mtime
+            return obj
 
-    @staticmethod
-    def _get_obj_path(source: Path) -> Path:
-        relative_path = source.relative_to(Path(cfg.SRC_DIR))
-        obj_path = OBJ_DIR / relative_path.with_suffix(".o")
-        obj_path.parent.mkdir(parents=True, exist_ok=True)
-        return obj_path
+        srcs = self._collect_srcs()
 
-    def _compile_source(self, source: Path) -> Path:
-        obj_path = self._get_obj_path(source)
+        with ThreadPoolExecutor(max_workers=self.cfg.parallel) as pool:
+            objects = list(pool.map(src_to_obj, srcs))
 
-        if not self._need_recompile(source, obj_path):
-            return obj_path
+        return objects
 
-        cmd_result = _run_cmd([
-            *self.exec_cmd, "-c", str(source), "-o", str(obj_path)
+    def _link(self, objs: list[Path]) -> None:
+        obj_str = [str(obj.relative_to(Path.cwd())) for obj in objs]
+
+        result = _run_cmd([
+            *self.exec_cmd, *
+            obj_str, "-o", str(self.cfg.target().relative_to(Path.cwd()))
         ])
 
-        if cmd_result.returncode != 0:
-            _print_err(cmd_result.returncode, f"Failed to compile `{source}`")
+        if result.returncode != 0:
+            Log.err("Failed to link", result.returncode)
 
-        return obj_path
+    def build(self, build_cfg: BuildConfig = BuildConfig(BuildMode.DEBUG)) -> None:
+        if build_cfg.should_clean:
+            shutil.rmtree(self.cfg.out_dir, ignore_errors=True)
+            self.cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
-    def _compile_all(self) -> list[Path]:
-        with ThreadPoolExecutor(max_workers=cfg.PARALLEL) as pool:
-            return list(pool.map(self._compile_source, self.sources))
+        if build_cfg.is_mode_release():
+            self.exec_cmd.extend(["-O2", "-DNDEBUG", "-s"])
+        else:
+            self.exec_cmd.extend(["-O0", "-g"])
 
-    def _link(self, objects: list[Path]) -> None:
-        obj_str = [str(obj) for obj in objects]
-        cmd_result = _run_cmd([*self.exec_cmd, *obj_str, "-o", str(TARGET)])
+        self.exec_cmd.extend(f"-D{ddf}" for ddf in self.cfg.defines)
+        self.exec_cmd.extend(f"-I{dir}" for dir in self.cfg.inc_dirs)
+        self.exec_cmd.extend(f"-L{dir}" for dir in self.cfg.lib_dirs)
+        self.exec_cmd.extend(f"-l{lib}" for lib in self.cfg.libraries)
 
-        if cmd_result.returncode != 0:
-            _print_err(cmd_result.returncode, "Failed to link")
+        start = time.time()
+        self._link(self._compile_srcs())
+        Log.ok(f"Built {self.cfg.name} in {time.time() - start:.2f}s")
 
-    def build(self) -> None:
-        self._link(self._compile_all())
+    def run(self, arguments: list[str] | None = None) -> None:
+        if arguments is None:
+            arguments = []
 
-    @staticmethod
-    def run(arguments: list[str] | None = None) -> None:
-        arguments = [] if arguments is None else arguments
+        target = self.cfg.target()
 
-        if not TARGET.exists():
-            _print_err(1, f"Target `{TARGET}` not found")
-
+        if not target.exists():
+            Log.err(f"Target `{target}` not found")
         try:
-            subprocess.run([str(TARGET), *arguments])
+            _run_cmd([str(target), *arguments])
         except KeyboardInterrupt:
             print()
             sys.exit(130)
 
 
-@dataclass(frozen=True)
 class CLI:
-    command: str
-    verbose: bool
-    release: bool
-    clean: bool
-    run_after: bool
-    args: list[str]
-
     @staticmethod
-    def parse() -> CLI:
+    def get_build_config() -> BuildConfig:
         if len(sys.argv) <= 1:
-            _print_help_message()
+            CLI.print_help()
+            sys.exit(0)
 
-        main_cmd = sys.argv[1].strip().lower()
+        match sys.argv[1].strip().lower():
+            case "debug": mode = BuildMode.DEBUG
+            case "release": mode = BuildMode.RELEASE
+            case "run": mode = BuildMode.RUN
+            case "--version" | "-v":
+                Log.pymake()
+                sys.exit(0)
+            case _:
+                CLI.print_help()
+                sys.exit(0)
 
-        if main_cmd in ("--help", "-h"):
-            _print_help_message()
-
-        if main_cmd not in {"debug", "release", "run"}:
-            _print_err(1, f"Unknown command `{main_cmd}`")
-
-        return CLI(
-            command=main_cmd,
-            verbose="--verbose" in sys.argv or "-v" in sys.argv,
-            release=main_cmd == "release",
-            clean=main_cmd == "release" or "--clean" in sys.argv or "-c" in sys.argv,
-            run_after="--run" in sys.argv or "-r" in sys.argv,
-            args=sys.argv[2:]
+        return BuildConfig(
+            mode,
+            "--clean" in sys.argv or "-c" in sys.argv,
+            "--run" in sys.argv or "-r" in sys.argv,
+            "--verbose" in sys.argv or "-v" in sys.argv,
+            sys.argv[2:] if mode == BuildMode.RUN else None
         )
 
+    @staticmethod
+    def print_help() -> None:
+        def usage(cmd: str, desc: str) -> None:
+            print(f"    {sys.argv[0]} {cmd:20}", end="")
+            Log.print(colorama.Fore.BLUE, desc)
 
-def main() -> None:
-    cli = CLI.parse()
+        def flag(flag: str, desc: str) -> None:
+            print(f"    {flag:29}", end="")
+            Log.print(colorama.Fore.BLUE, desc)
 
-    global flag_verbose
-    flag_verbose = cli.verbose
+        Log.pymake()
+        Log.print(colorama.Style.DIM, "=" * 80)
+        Log.print(colorama.Style.BRIGHT, "Usage:")
+        usage("[--help | -h]", "Show this help message")
+        usage("debug [flags]", "Build with debug symbols")
+        usage("release [flags]", "Build optimized")
+        usage("run [...]", "Run binary with given arguments")
+        Log.print(colorama.Style.DIM, "=" * 80)
+        Log.print(colorama.Style.BRIGHT, "Flags:")
+        flag("--verbose | -v", "Show commands")
+        flag("--clean   | -c", "Clean build first")
+        flag("--run     | -r", "Run after build")
+        Log.print(colorama.Style.DIM, "=" * 80)
 
-    if cli.command == "run":
-        ProjectBuilder.run(sys.argv[2:])
-        sys.exit(0)
 
-    builder = ProjectBuilder(cli.clean, cli.release)
-    builder.build()
+class Log:
+    f_verbose = False
 
-    if cli.run_after:
-        builder.run()
+    @staticmethod
+    def _wrap(color: str, message: str) -> str:
+        return f"{color}{message}{colorama.Style.RESET_ALL}"
+
+    @staticmethod
+    def print(color: str, *args, **kwargs) -> None:
+        print(color, end="")
+        print(*args, **kwargs)
+        print(colorama.Style.RESET_ALL, end="")
+
+    @staticmethod
+    def dbg(message: str) -> None:
+        if Log.f_verbose:
+            print(f"{Log._wrap(colorama.Fore.CYAN, "debug: ")}{message}")
+
+    @staticmethod
+    def err(message: str, err_code: int = 1) -> None:
+        print(f"{Log._wrap(colorama.Fore.RED, "error: ")}{message}")
+        sys.exit(err_code)
+
+    @staticmethod
+    def ok(message: str) -> None:
+        if Log.f_verbose:
+            print(f"{Log._wrap(colorama.Fore.GREEN, "ok: ")}{message}")
+
+    @staticmethod
+    def cmd(cmd: list[str]) -> None:
+        if Log.f_verbose:
+            command = " ".join(str(c) for c in cmd)
+            print(f"{Log._wrap(colorama.Style.DIM, f"> {command}")}")
+
+    @staticmethod
+    def pymake() -> None:
+        Log.print(colorama.Style.BRIGHT, f"PyMake v{VERSION}")
+        Log.print(colorama.Fore.BLUE, f"Platform: ", end="")
+        Log.print(f"{PLATFORM} {platform.release()}")
+        Log.print(colorama.Fore.BLUE, f"Python: ", end="")
+        Log.print(f"Python: {colorama.Fore.WHITE}{sys.version}")
+
+
+def init(verbose: bool = False) -> None:
+    colorama.init(autoreset=True)
+    Log.f_verbose = verbose
+
+
+def _run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
+    Log.cmd(cmd)
+    return subprocess.run(cmd, check=False)
 
 
 if __name__ == "__main__":
-    colorama.init(autoreset=True)
-    main()
+    Log.pymake()
