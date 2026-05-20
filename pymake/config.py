@@ -1,12 +1,21 @@
 import sys
 import platform
-from dataclasses import dataclass
+import shutil
 from enum import Enum
 from pathlib import Path
+from dataclasses import dataclass
 
 from . import _log
 
 VERSION: int = 2
+
+
+class Compiler(Enum):
+    GCC = "gcc"
+    GXX = "g++"
+    CLANG = "clang"
+    CLANGXX = "clang++"
+    MSVC = "cl"
 
 
 @dataclass(frozen=True)
@@ -86,7 +95,7 @@ class BuildConfig:
 @dataclass
 class ProjectConfig:
     name: str = "app"
-    cc: str = "g++"
+    cc: Compiler = Compiler.GXX
     standard: str = "c++23"
     cxx_flags: tuple[str, ...] = ("-Wall", "-Wextra", "-Wpedantic")
     src_dir: Path = Path("source")
@@ -99,6 +108,9 @@ class ProjectConfig:
     pch_header: Path | None = None
 
     def __post_init__(self) -> None:
+        if shutil.which(self.cc.value) is None:
+            _log.err(f"Compiler $B`{self.cc}`$0 not found.")
+
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.src_dir.exists():
@@ -114,7 +126,7 @@ class ProjectConfig:
 
     def get_flags(self) -> tuple[str, ...]:
         return (
-            self.cc,
+            str(self.cc),
             f"-std={self.standard}",
             *self.cxx_flags,
             *[f"-D{ddf}" for ddf in self.defines],

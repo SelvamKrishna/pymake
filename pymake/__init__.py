@@ -30,6 +30,38 @@ def run_project() -> None:
         s_proj.run()
 
 
+def remove_path(path: Path) -> None:
+    if not path.exists():
+        return
+
+    if path.is_file():
+        path.unlink()
+
+    elif path.is_dir():
+        path.rmdir() if len(list(path.iterdir())) == 0 else shutil.rmtree(path)
+
+    _log.info(f"Removed $file`{path}`$0")
+
+
+def copy_path(src: Path, dst: Path) -> None:
+    _log.info(f"Copying $file`{src}`$0 to $file`{dst}`$0...")
+
+    if not src.exists():
+        _log.err(f"File $file`{src}`$0 does not exist")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst) if src.is_file() else shutil.copytree(src, dst)
+
+
+def move_path(src: Path, dst: Path) -> None:
+    _log.info(f"Moving $file`{src}`$0 to $file`{dst}`$0...")
+
+    if not src.exists():
+        _log.err(f"File $file`{src}`$0 does not exist")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(src, dst)
+
+
 if __name__ == "__main__":
-    from . import _log
     _log.print_version()

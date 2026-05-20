@@ -109,6 +109,7 @@ class ArchivePackage(_IPackage):
                 tmp_path = Path(tmp.name)
                 _cmd.call_cmd(
                     ["curl", "-L", "--fail", self.link, "-o", str(tmp_path)])
+                tmp_path.chmod(tmp_path.stat().st_mode | 0o111)
 
             temp_extract_dir = self.path.parent / f".temp_extract_{self.name}"
             if temp_extract_dir.exists():

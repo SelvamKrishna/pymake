@@ -21,7 +21,7 @@ class Project:
         self._link_cmd: list[str] = []
         self._pch_path: Path | None = None
         self._base_cmd: list[str] = [
-            self.prjcfg.cc, f"-std={self.prjcfg.standard}"]
+            self.prjcfg.cc.value, f"-std={self.prjcfg.standard}"]
 
     def build(self) -> None:
         if self.buildcfg.is_mode_run():
